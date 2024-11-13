@@ -1,0 +1,215 @@
+import mysql.connector
+import speech_recognition as sr
+from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ConversationHandler, filters
+from datetime import datetime
+import re
+import os
+from pydub import AudioSegment
+
+# Настройки базы данных
+db_config = {
+    'user': 'root',
+    'password': 'Asdqwe!23',
+    'host': 'localhost',
+    'database': 'university_bot'
+}
+
+# Создание подключения к базе данных
+db_connection = mysql.connector.connect(**db_config)
+cursor = db_connection.cursor()
+
+# Состояния для разговора
+ROLE, CODE, FULLNAME, GROUP, RECORD_VOICE, CONFIRM_DEADLINE = range(6)
+
+
+# Функция для обработки команды /start
+async def start(update: Update, context):
+    await update.message.reply_text(
+        "Привет! Я бот для отслеживания дедлайнов. Выберите вашу роль: учитель или студент."
+    )
+    return ROLE
+
+
+# Функция для обработки выбора роли
+async def role_selected(update: Update, context):
+    user_role = update.message.text.lower()
+
+    if user_role == "учитель":
+        await update.message.reply_text("Введите ваш уникальный код.")
+        return CODE
+    elif user_role == "студент":
+        await update.message.reply_text("Пожалуйста, введите ваше полное имя.")
+        return FULLNAME
+    else:
+        await update.message.reply_text("Пожалуйста, выберите корректную роль: учитель или студент.")
+        return ROLE
+
+
+# Функция для обработки ввода кода учителя
+async def enter_code(update: Update, context):
+    code = update.message.text
+    cursor.execute("SELECT * FROM teachers WHERE code = %s", (code,))
+    teacher = cursor.fetchone()
+
+    if teacher:
+        await update.message.reply_text(
+            f"Добро пожаловать, {teacher[1]}!\nВы можете установить дедлайны для следующих групп:")
+        # Запрос групп из базы данных
+        cursor.execute("SELECT DISTINCT major FROM students")
+        groups = cursor.fetchall()
+
+        buttons = [[KeyboardButton(group[0])] for group in groups]
+        reply_markup = ReplyKeyboardMarkup(buttons, resize_keyboard=True)
+        await update.message.reply_text("Выберите группу:", reply_markup=reply_markup)
+
+        context.user_data['teacher'] = teacher[1]  # Сохраняем имя учителя
+        return GROUP
+    else:
+        await update.message.reply_text("Неверный код. Пожалуйста, попробуйте еще раз.")
+        return CODE
+
+
+# Функция для обработки ввода полного имени студента
+async def enter_fullname(update: Update, context):
+    fullname = update.message.text
+    context.user_data['fullname'] = fullname  # Сохраняем полное имя
+    await update.message.reply_text("Вы успешно зарегистрированы. Пожалуйста, выберите вашу группу.")
+
+    # Запрос групп из базы данных
+    cursor.execute("SELECT DISTINCT major FROM students")
+    groups = cursor.fetchall()
+
+    buttons = [[KeyboardButton(group[0])] for group in groups]
+    reply_markup = ReplyKeyboardMarkup(buttons, resize_keyboard=True)
+    await update.message.reply_text("Выберите группу:", reply_markup=reply_markup)
+
+    return GROUP  # Переход к выбору группы
+
+
+# Функция для обработки выбора группы
+async def select_group(update: Update, context):
+    group = update.message.text
+    context.user_data['group'] = group  # Сохраняем выбранную группу
+    await update.message.reply_text(
+        f"Вы выбрали группу '{group}'. Пожалуйста, запишите голосовое сообщение с дедлайном.")
+    return RECORD_VOICE
+
+
+# Функция для обработки голосового сообщения
+async def record_voice(update: Update, context):
+    voice = update.message.voice
+    file_id = voice.file_id
+    new_file = await context.bot.get_file(file_id)
+
+    ogg_file_path = f"voice_{update.message.from_user.id}.ogg"
+    wav_file_path = f"voice_{update.message.from_user.id}.wav"
+    await new_file.download_to_drive(ogg_file_path)
+
+    audio = AudioSegment.from_ogg(ogg_file_path)
+    audio.export(wav_file_path, format="wav")
+
+    recognizer = sr.Recognizer()
+    with sr.AudioFile(wav_file_path) as source:
+        audio_data = recognizer.record(source)
+
+    try:
+        text = recognizer.recognize_google(audio_data, language="ru-RU")
+        print(f"Распознанный текст: {text}")
+        await update.message.reply_text(f"Вы сказали: {text}")
+
+        # Ищем дату и время в распознанном тексте
+        deadline_match = re.search(r'до (\d{1,2}) (\w+) (\d{1,2}:\d{2})', text)
+
+        if deadline_match:
+            print(f"Найдена дата: {deadline_match.groups()}")
+            day, month_name, time = deadline_match.groups()
+
+            # Преобразуем название месяца в номер
+            months = {
+                'января': '01', 'февраля': '02', 'марта': '03', 'апреля': '04',
+                'мая': '05', 'июня': '06', 'июля': '07', 'августа': '08',
+                'сентября': '09', 'октября': '10', 'ноября': '11', 'декабря': '12'
+            }
+
+            month = months.get(month_name.lower())
+            print(f"Распознанный месяц: {month_name}, Номер месяца: {month}")  # Отладочное сообщение
+
+            if month:
+                # Получаем текущий год
+                year = datetime.now().year
+                deadline = f"{year}-{month}-{day} {time}:00"
+
+                # Отправляем подтверждение
+                await update.message.reply_text(
+                    f"Установить дедлайн для группы '{context.user_data.get('group', 'неизвестно')}' на {deadline}? (Да/Нет)"
+                )
+                context.user_data['deadline'] = deadline
+                return CONFIRM_DEADLINE  # Переходим к подтверждению дедлайна
+            else:
+                print("Дата не найдена в тексте.")
+                await update.message.reply_text("Не удалось распознать месяц. Попробуйте снова.")
+                return RECORD_VOICE  # Ожидаем новое голосовое сообщение
+        else:
+            await update.message.reply_text(
+                "Не удалось распознать дату. Попробуйте снова записать голосовое сообщение.")
+            return RECORD_VOICE  # Ожидаем новое голосовое сообщение
+
+    except sr.UnknownValueError:
+        await update.message.reply_text("Не удалось распознать речь. Попробуйте еще раз.")
+        return RECORD_VOICE  # Ожидаем новое голосовое сообщение
+    except sr.RequestError as e:
+        await update.message.reply_text(f"Ошибка сервиса распознавания: {e}")
+        return RECORD_VOICE  # Ожидаем новое голосовое сообщение
+
+
+
+
+# Функция для подтверждения дедлайна
+async def confirm_deadline(update: Update, context):
+    if update.message.text.lower() == 'да':
+        # Здесь можно сохранить дедлайн в базе данных
+        await update.message.reply_text("Дедлайн установлен!")
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text("Пожалуйста, запишите голосовое сообщение снова.")
+        return RECORD_VOICE  # Ожидаем новое голосовое сообщение
+
+
+# Функция для отмены операции
+async def cancel(update: Update, context):
+    await update.message.reply_text("Операция отменена.")
+    return ConversationHandler.END
+
+
+# Основная часть программы — запускаем бота
+if __name__ == '__main__':
+    # Вставьте сюда ваш токен от BotFather
+    bot_token = "8132054331:AAHRduzUcR7tgfPwaOiAQmGA9ya5pvqQpj8"
+
+    # Создаем приложение бота с использованием токена
+    app = ApplicationBuilder().token(bot_token).build()
+
+    # Создаем ConversationHandler для процесса выбора роли и регистрации
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            ROLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, role_selected)],
+            CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_code)],
+            FULLNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_fullname)],
+            GROUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, select_group)],
+            RECORD_VOICE: [MessageHandler(filters.VOICE, record_voice)],
+            CONFIRM_DEADLINE: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_deadline)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    )
+
+    # Регистрируем команды и обработчики
+    app.add_handler(conv_handler)
+
+    # Запускаем бота
+    app.run_polling()
+
+    # Закрываем соединение с базой данных при завершении работы бота
+    cursor.close()
+    db_connection.close()
