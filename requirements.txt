@@ -1,0 +1,11 @@
+aiogram==3.14.0                 # Telegram-бот
+aiohttp==3.10.10                # Асинхронные HTTP-запросы (может быть частью aiogram)
+aiomysql==0.2.0                 # Асинхронная работа с MySQL
+attrs==24.2.0                   # Используется в асинхронных библиотеках (aiogram, aiohttp)
+Flask==3.0.3                    # Веб-приложение
+pydub==0.25.1                   # Обработка аудио
+PyMySQL==1.1.1                  # Альтернатива aiomysql (если используете где-то синхронную работу с MySQL)
+python-dotenv==1.0.1            # Работа с .env файлами
+requests==2.32.3                # HTTP-запросы (для API)
+SpeechRecognition==3.11.0       # Распознавание речи
+python-telegram-bot==21.6       # Альтернативный Telegram-бот (если не используете aiogram)
